@@ -1,7 +1,7 @@
 /* ~~~~~~Encryption~~~~~~
 (Good to start encryption before any code run)*/
 
-// require("dotenv").config();
+require("dotenv").config();
 
 // const encrypt = require("mongoose-encryption"); //I tried combine this with bcrypt to provide 2 layers of encryption for our database and it worked. But I don't how is it good in practice.
 
@@ -17,6 +17,8 @@ const mongoose = require("mongoose");
 const session = require("express-session");
 const passport = require("passport");
 const passportLocalMongoose = require("passport-local-mongoose");
+const GoogleStrategy = require("passport-google-oauth20").Strategy;
+const findOrCreate = require("mongoose-findorcreate");
 
 const app = express();
 
@@ -27,7 +29,7 @@ app.listen(3000);
 
 app.use(
   session({
-    secret: "toBeAssigned",
+    secret: "toBeAssigned", //This secret key should be saved in .env
     resave: false,
     saveUninitialized: false,
   })
@@ -41,6 +43,8 @@ mongoose.connect("mongodb://localhost:27017/userDB", { useNewUrlParser: true, us
 const userSchema = new mongoose.Schema({
   email: String,
   password: String,
+  googleId: String,
+  secret: String,
 });
 
 // userSchema.plugin(encrypt, { secret: process.env.SECRECT, encryptedFields: ["password"] });
@@ -49,12 +53,41 @@ const userSchema = new mongoose.Schema({
 userSchema.plugin(passportLocalMongoose); //This will salt & hash our database.
 //Again, we must create this plugin before create new mongoose.model because we want to pass the encrypted schema into the new model.
 
+userSchema.plugin(findOrCreate);
+
 const User = new mongoose.model("User", userSchema);
 
 passport.use(User.createStrategy());
 
-passport.serializeUser(User.serializeUser()); //Generate cookie
-passport.deserializeUser(User.deserializeUser()); //Digest cookie
+//passport-local-mongoose way of serialize. But not effect with Google Strategy.
+// passport.serializeUser(User.serializeUser()); //Generate cookie
+// passport.deserializeUser(User.deserializeUser()); //Digest cookie
+
+//Below is passport native way of serialize.
+passport.serializeUser(function (user, done) {
+  done(null, user.id);
+});
+
+passport.deserializeUser(function (id, done) {
+  User.findById(id, function (err, user) {
+    done(err, user);
+  });
+});
+
+passport.use(
+  new GoogleStrategy(
+    {
+      clientID: process.env.CLIENT_ID,
+      clientSecret: process.env.CLIENT_SECRET,
+      callbackURL: "http://localhost:3000/auth/google/secrets",
+    },
+    function (accessToken, refreshToken, profile, cb) {
+      User.findOrCreate({ googleId: profile.id }, function (err, user) {
+        return cb(err, user);
+      });
+    }
+  )
+);
 
 app.get("/", function (req, res) {
   res.render("home");
@@ -68,19 +101,52 @@ app.get("/register", function (req, res) {
   res.render("register");
 });
 
+app.get("/auth/google", passport.authenticate("google", { scope: ["profile"] }));
+
+app.get("/auth/google/secrets", passport.authenticate("google", { failureRedirect: "/login" }), function (req, res) {
+  // Successful authentication, redirect the user.
+  res.redirect("/secrets");
+});
+
 app.get("/logout", function (req, res) {
   req.logout();
   res.redirect("/");
 });
 
 app.get("/secrets", function (req, res) {
-  /*I read somewhere the return value is Boolean for "isAuthenticated()", don't we need to check true/false? like this:
-  if (req.isAuthenticated() === true) */
+  User.find({ secret: { $ne: null } }, function (err, foundUsers) {
+    if (err) {
+      console.log(err);
+    } else {
+      if (foundUsers) {
+        res.render("secrets", { usersWithSecrets: foundUsers });
+      }
+    }
+  });
+});
+
+app.get("/submit", function (req, res) {
   if (req.isAuthenticated()) {
-    res.render("secrets");
+    res.render("submit");
   } else {
     res.redirect("/login");
   }
+});
+
+app.post("/submit", function (req, res) {
+  const submittedSecret = req.body.secret;
+  //Once the user is authenticated and their session gets saved, their user details are saved to req.user.
+  //  console.log(req.user.id);
+  //Get to know we can tap into user details and find the user id.
+  User.findById(req.user.id, function (err, foundUser) {
+    if (err) {
+      console.log(err);
+    } else {
+      foundUser.secret = submittedSecret;
+      foundUser.save();
+      res.redirect("/secrets");
+    }
+  });
 });
 
 app.post("/register", function (req, res) {
@@ -106,40 +172,40 @@ app.post("/register", function (req, res) {
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~Nestor's version~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 /* Below codes are from Nestor which is also correct. It is longer because he search pull data from database then only authenticate the user. He also redirect use to login page when error.*/
-app.post("/login", function(req, res){
+app.post("/login", function (req, res) {
   //check the DB to see if the username that was used to login exists in the DB
-  User.findOne({username: req.body.username}, function(err, foundUser){
+  User.findOne({ username: req.body.username }, function (err, foundUser) {
     //if username is found in the database, create an object called "user" that will store the username and password
     //that was used to login
-    if(foundUser){
-    const user = new User({
-      username: req.body.username,
-      password: req.body.password
-    });
+    if (foundUser) {
+      const user = new User({
+        username: req.body.username,
+        password: req.body.password,
+      });
       //use the "user" object that was just created to check against the username and password in the database
       //in this case below, "user" will either return a "false" boolean value if it doesn't match, or it will
       //return the user found in the database
-      passport.authenticate("local", function(err, user){
-        if(err){
+      passport.authenticate("local", function (err, user) {
+        if (err) {
           console.log(err);
         } else {
           //this is the "user" returned from the passport.authenticate callback, which will be either
           //a false boolean value if no it didn't match the username and password or
           //a the user that was found, which would make it a truthy statement
-          if(user){
+          if (user) {
             //if true, then log the user in, else redirect to login page
-            req.login(user, function(err){
-            res.redirect("/secrets");
+            req.login(user, function (err) {
+              res.redirect("/secrets");
             });
           } else {
             res.redirect("/login");
           }
         }
       })(req, res);
-    //if no username is found at all, redirect to login page.
+      //if no username is found at all, redirect to login page.
     } else {
       //user does not exists
-      res.redirect("/login")
+      res.redirect("/login");
     }
   });
 });
